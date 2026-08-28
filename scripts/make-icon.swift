@@ -6,8 +6,13 @@
  *                               gradient, white whale)
  *   Assets/menubar-whale.png  — 32 px whale for the menu-bar template image
  *
- * Uses qlmanage (system) for SVG rasterization, CoreGraphics for compositing,
- * iconutil for the icns. Run from the repo root:  swift scripts/make-icon.swift
+ * The SVG is rasterized by an built-in SVG-path parser + CoreGraphics fill
+ * (non-zero winding, the SVG default). qlmanage/QuickLook is NOT used: it
+ * renders this multi-subpath fill-rule-dependent SVG unreliably (full
+ * bounding box on some invocations, empty on others).
+ *
+ * Supported path commands: M m L l H h V v C c S s Z z.
+ * Run from the repo root:  swift scripts/make-icon.swift
  */
 
 import CoreGraphics
@@ -20,6 +25,124 @@ let repoRoot = URL(fileURLWithPath: CommandLine.arguments[0])
 let assets = repoRoot.appendingPathComponent("Assets")
 let whaleSVG = assets.appendingPathComponent("whale.svg")
 
+// MARK: - SVG path parser
+
+/// Token stream of an SVG path `d` attribute.
+private enum PathToken {
+	case command(Character)
+	case number(Double)
+}
+
+private func tokenizePath(_ d: String) -> [PathToken] {
+	var tokens: [PathToken] = []
+	var index = d.startIndex
+	let decimal = CharacterSet(charactersIn: "-+.eE0123456789")
+	while index < d.endIndex {
+		let char = d[index]
+		if char.isWhitespace || char == "," {
+			index = d.index(after: index)
+		} else if char.isLetter {
+			tokens.append(.command(char))
+			index = d.index(after: index)
+		} else if decimal.contains(d.unicodeScalars[index]) {
+			var end = index
+			while end < d.endIndex, decimal.contains(d.unicodeScalars[end]) { end = d.index(after: end) }
+			tokens.append(.number(Double(d[index..<end]) ?? 0))
+			index = end
+		} else {
+			index = d.index(after: index)
+		}
+	}
+	return tokens
+}
+
+/**
+ * Parses an SVG path `d` string into a CGMutablePath (SVG coordinates,
+ * y-down). Handles M/m, L/l, H/h, V/v, C/c, S/s, Z/z with implicit
+ * repetition; unsupported commands abort.
+ */
+struct SVGPathParser {
+
+	private(set) var path = CGMutablePath()
+	private var current = CGPoint.zero
+	private var subpathStart = CGPoint.zero
+	private var lastCubicControl: CGPoint?
+
+	mutating func parse(_ d: String) {
+		var tokens = tokenizePath(d)
+		var index = 0
+		var command: Character = "M"
+
+		func nextNumber() -> Double {
+			guard index < tokens.count, case .number(let value) = tokens[index] else { return 0 }
+			index += 1
+			return value
+		}
+		func nextPoint(_ relative: Bool, dx: Double = 0, dy: Double = 0) -> CGPoint {
+			let x = nextNumber() + (relative ? Double(current.x) : dx)
+			let y = nextNumber() + (relative ? Double(current.y) : dy)
+			return CGPoint(x: x, y: y)
+		}
+
+		while index < tokens.count {
+			if case .command(let c) = tokens[index] {
+				command = c
+				index += 1
+			}
+			let relative = command.isLowercase
+			switch Character(command.uppercased()) {
+			case "M":
+				let point = nextPoint(relative)
+				path.move(to: point)
+				subpathStart = point
+				current = point
+				command = relative ? "l" : "L" // implicit line-to on repeats
+			case "L":
+				let point = nextPoint(relative)
+				path.addLine(to: point)
+				current = point
+				lastCubicControl = nil
+			case "H":
+				let x = nextNumber() + (relative ? Double(current.x) : 0)
+				let point = CGPoint(x: x, y: current.y)
+				path.addLine(to: point)
+				current = point
+				lastCubicControl = nil
+			case "V":
+				let y = nextNumber() + (relative ? Double(current.y) : 0)
+				let point = CGPoint(x: current.x, y: y)
+				path.addLine(to: point)
+				current = point
+				lastCubicControl = nil
+			case "C":
+				let c1 = nextPoint(relative)
+				let c2 = nextPoint(relative)
+				let to = nextPoint(relative)
+				path.addCurve(to: to, control1: c1, control2: c2)
+				lastCubicControl = c2
+				current = to
+			case "S":
+				let reflected = lastCubicControl.map { CGPoint(x: 2 * current.x - $0.x, y: 2 * current.y - $0.y) } ?? current
+				let c2 = nextPoint(relative)
+				let to = nextPoint(relative)
+				path.addCurve(to: to, control1: reflected, control2: c2)
+				lastCubicControl = c2
+				current = to
+			case "Z":
+				path.closeSubpath()
+				path.move(to: subpathStart)
+				current = subpathStart
+				lastCubicControl = nil
+				command = "M" // a fresh subpath needs an explicit M after Z
+			default:
+				Swift.print("make-icon: unsupported path command \(command)")
+				exit(1)
+			}
+		}
+		tokens.removeAll()
+	}
+}
+
 // MARK: - Helpers
 
 func fail(_ message: String) -> Never {
@@ -27,27 +150,15 @@ func fail(_ message: String) -> Never {
 	exit(1)
 }
 
-/// Rasterize the SVG via QuickLook into `size` px PNG, return the CGImage.
-func rasterizeWhale(size: Int) -> CGImage {
-	let tmp = FileManager.default.temporaryDirectory
-		.appendingPathComponent("dsh-icon-\(size)-\(UUID().uuidString).svg")
-	try? FileManager.default.copyItem(at: whaleSVG, to: tmp)
-	defer { try? FileManager.default.removeItem(at: tmp) }
-	let outDir = tmp.deletingLastPathComponent()
-	let process = Process()
-	process.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
-	process.arguments = ["-t", "-s", "\(size)", "-o", outDir.path, tmp.path]
-	process.standardOutput = FileHandle.nullDevice
-	process.standardError = FileHandle.nullDevice
-	try? process.run()
-	process.waitUntilExit()
-	guard process.terminationStatus == 0 else { fail("qlmanage failed") }
-	let png = outDir.appendingPathComponent(tmp.lastPathComponent + ".png")
-	guard let src = CGImageSourceCreateWithURL(png as CFURL, nil),
-		let image = CGImageSourceCreateImageAtIndex(src, 0, nil)
-	else { fail("could not read rasterized PNG") }
-	try? FileManager.default.removeItem(at: png)
-	return image
+/// The whale silhouette as a parsed path in SVG coordinates (50×50, y-down).
+func whalePath() -> CGMutablePath {
+	guard let svg = try? String(contentsOf: whaleSVG, encoding: .utf8),
+		let open = svg.range(of: " d=\""),
+		let close = svg.range(of: "\"", range: open.upperBound..<svg.endIndex)
+	else { fail("could not extract the path data from whale.svg") }
+	var parser = SVGPathParser()
+	parser.parse(String(svg[open.upperBound..<close.lowerBound]))
+	return parser.path
 }
 
 func rgbaContext(width: Int, height: Int) -> CGContext {
@@ -63,6 +174,19 @@ func writePNG(_ image: CGImage, to url: URL) {
 	else { fail("png destination failed: \(url.path)") }
 	CGImageDestinationAddImage(dest, image, nil)
 	guard CGImageDestinationFinalize(dest) else { fail("png write failed: \(url.path)") }
+}
+
+/// Rasterize the whale path to `size` px, filled black on transparent.
+func renderWhale(size: Int) -> CGImage {
+	let ctx = rgbaContext(width: size, height: size)
+	let scale = CGFloat(size) / 50 // SVG viewBox is 50×50
+	ctx.translateBy(x: 0, y: CGFloat(size)) // flip y: SVG is y-down
+	ctx.scaleBy(x: scale, y: -scale)
+	ctx.addPath(whalePath())
+	ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+	ctx.drawPath(using: .fill) // non-zero winding — the SVG default
+	guard let out = ctx.makeImage() else { fail("whale rasterization failed") }
+	return out
 }
 
 /// The white whale silhouette (whale raster tinted flat white, alpha kept).
@@ -85,12 +209,10 @@ func whiteWhale(base: CGImage, canvas: Int) -> CGImage {
 func composeMaster(size: Int, whale: CGImage) -> CGImage {
 	let ctx = rgbaContext(width: size, height: size)
 	let full = CGRect(x: 0, y: 0, width: size, height: size)
-	// Rounded squircle (~22.5% radius).
 	ctx.saveGState()
 	let radius = CGFloat(size) * 0.225
 	ctx.addPath(CGPath(roundedRect: full, cornerWidth: radius, cornerHeight: radius, transform: nil))
 	ctx.clip()
-	// Vertical gradient, DeepSeek blue range.
 	let colors = [
 		CGColor(red: 0.388, green: 0.533, blue: 1.0, alpha: 1), // #6388FF
 		CGColor(red: 0.180, green: 0.310, blue: 0.910, alpha: 1), // #2E4FE8
@@ -98,7 +220,6 @@ func composeMaster(size: Int, whale: CGImage) -> CGImage {
 	let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!, colors: colors, locations: [0, 1])!
 	ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: CGFloat(size)),
 		end: CGPoint(x: 0, y: 0), options: [])
-	// White whale centered.
 	let w = CGFloat(whale.width), h = CGFloat(whale.height)
 	let rect = CGRect(x: (CGFloat(size) - w) / 2, y: (CGFloat(size) - h) / 2, width: w, height: h)
 	ctx.interpolationQuality = .high
@@ -123,8 +244,8 @@ setbuf(stdout, nil)
 try? FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
 guard FileManager.default.fileExists(atPath: whaleSVG.path) else { fail("Assets/whale.svg missing") }
 
-print("▸ rasterizing whale")
-let whaleBase = rasterizeWhale(size: 1024)
+print("▸ rasterizing whale (CoreGraphics)")
+let whaleBase = renderWhale(size: 1024)
 
 print("▸ composing master icon")
 let master = composeMaster(size: 1024, whale: whiteWhale(base: whaleBase, canvas: 1024))
@@ -151,7 +272,6 @@ guard iconutil.terminationStatus == 0 else { fail("iconutil failed") }
 try? FileManager.default.removeItem(at: iconset)
 
 print("▸ menubar glyph → Assets/menubar-whale.png")
-// Route through our context (2× supersampled) so the colorspace is ours.
-writePNG(resized(rasterizeWhale(size: 64), to: 32), to: assets.appendingPathComponent("menubar-whale.png"))
+writePNG(resized(renderWhale(size: 64), to: 32), to: assets.appendingPathComponent("menubar-whale.png"))
 
 print("✓ done")
