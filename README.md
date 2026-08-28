@@ -1,34 +1,67 @@
 # DSH Controller
 
-macOS 菜单栏小控件，一键启动 / 终止 DSH Web 服务，不用再开终端敲命令。
+A macOS menu-bar controller for the [DSH](https://www.npmjs.com/package/@deepseek-ai/dsh)
+web server — start and stop `dsh web` with one click, no terminal required.
 
-## 功能
+## Features
 
-菜单栏常驻 `dsh ●` 图标（绿=运行中，灰=已停止，黄=切换中），点击弹出菜单：
+A resident status-bar item — the DSH whale plus a status dot
+(🟢 running · ⚪ stopped · 🟡 switching) — with a menu that offers:
 
-| 菜单项 | 说明 |
+| Menu item | Action |
 |---|---|
-| 启动 dsh | 后台启动 `dsh web`（nohup 分离进程，日志写入 `~/Library/Logs/dsh-web.log`） |
-| 终止 dsh | 向监听 3080 端口的进程发 SIGTERM，5 秒未退自动升级 SIGKILL |
-| 打开 Web 界面 | 打开浏览器访问 `http://127.0.0.1:3080` |
-| 开机自启动 | 注册 / 取消登录项（SMAppService） |
-| 退出控制器 | 退出菜单栏控件本身（不影响 dsh 服务） |
+| 启动 dsh (Start) | Launches `dsh web` detached (`nohup`, logs to `~/Library/Logs/dsh-web.log`) |
+| 终止 dsh (Stop) | SIGTERMs the process listening on the GUI port, escalating to SIGKILL after 5 s |
+| 打开 Web 界面 (Open UI) | Opens the GUI in your default browser |
+| 开机自启动 (Launch at login) | Registers/unregisters the login item (`SMAppService`) |
+| 退出控制器 (Quit) | Quits the controller itself (the dsh server keeps running) |
 
-状态每 3 秒探测一次端口；打开菜单时也会立即刷新。
+Status is probed every 3 s (and refreshed the moment the menu opens).
 
-## 构建
+## Build
 
-依赖：Xcode Command Line Tools（`swiftc`）。
+Requirements: macOS 13+, Xcode Command Line Tools (`swiftc`).
 
 ```zsh
-./build.sh            # 编译 + 安装到 /Applications 并重启
-./build.sh ~/Apps/DSH\ Controller.app   # 自定义安装位置
+./build.sh                          # build, install to /Applications, relaunch
+./build.sh ~/Apps/DSH\ Controller.app   # custom install location
 ```
 
-## 设计说明
+Regenerate the icons after editing `Assets/whale.svg`:
 
-- **单文件 AppKit**（`dsh-controller.swift`，约 220 行），无第三方依赖，`LSUIElement` 不占 Dock。
-- **终止用 lsof 按端口定位**而非 `pkill -f`：实测本机 pgrep/pkill 匹配不到 `dsh web`
-  进程的 argv，而 `lsof -tiTCP:3080 -sTCP:LISTEN` 始终准确。
-- **启动带完整 PATH**：Finder 启动的 GUI 进程没有 nvm 环境，脚本显式注入 node bin 目录。
-- 若 dsh 装到别的 node 版本 / 端口，改源码顶部常量（`dshBin` / `nodeBin` / `dshPort`）后重新构建。
+```zsh
+swift scripts/make-icon.swift
+```
+
+## Configuration
+
+Defaults domain `local.dsh.controller`:
+
+```zsh
+# Absolute path of the dsh launcher (default: auto-detected once via an
+# interactive login shell, so nvm-installed dsh is found automatically).
+defaults write local.dsh.controller dshPath /usr/local/bin/dsh
+
+# GUI port (default 3080).
+defaults write local.dsh.controller port 8080
+```
+
+## Design notes
+
+- **Single-file AppKit** (`dsh-controller.swift`, ~270 lines), no third-party
+  dependencies, `LSUIElement` so it stays out of the Dock.
+- **Stop is port-based** (`lsof -tiTCP:<port> -sTCP:LISTEN`), not
+  `pkill -f`: pattern-matching the server's argv proved unreliable on the
+  reference machine, while lsof always finds the actual listener.
+- **Start injects PATH**: GUI-launched processes have no shell environment,
+  so the launcher's own bin dir (nvm's, next to `node`) is prepended.
+
+## Credits
+
+- The whale glyph (`Assets/whale.svg`) comes from
+  [`@deepseek-ai/dsh`](https://www.npmjs.com/package/@deepseek-ai/dsh)
+  (MIT license).
+
+## License
+
+[MIT](LICENSE) © nlqs
