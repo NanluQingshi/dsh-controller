@@ -1,0 +1,6 @@
+# build artifacts
+DSHController
+*.o
+
+# macOS
+.DS_Store
