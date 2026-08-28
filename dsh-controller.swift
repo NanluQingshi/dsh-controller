@@ -192,7 +192,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	}
 
 	@objc private func openUI() {
+		guard !focusExistingTab() else { return }
 		NSWorkspace.shared.open(dshURL)
+	}
+
+	// MARK: Existing-tab focus
+
+	/// Scriptable browsers we know how to focus a tab in.
+	private static let scriptableBrowsers: [(bundleID: String, appName: String, safari: Bool)] = [
+		("com.google.Chrome", "Google Chrome", false),
+		("com.microsoft.edgemac", "Microsoft Edge", false),
+		("com.brave.Browser", "Brave Browser", false),
+		("org.chromium.Chromium", "Chromium", false),
+		("com.apple.Safari", "Safari", true),
+	]
+
+	/// URL prefixes that count as "the GUI is already open in a tab".
+	private var guiURLPrefixes: [String] {
+		["http://127.0.0.1:\(dshPort)/", "http://localhost:\(dshPort)/"]
+	}
+
+	/**
+	 * Try to focus an already-open GUI tab instead of opening a new one:
+	 * the default browser first, then any other running scriptable browser.
+	 * Returns true when a tab was focused.
+	 */
+	private func focusExistingTab() -> Bool {
+		let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+		var order = Self.scriptableBrowsers.filter { running.contains($0.bundleID) }
+		if let defaultBrowser = NSWorkspace.shared.urlForApplication(toOpen: dshURL)
+			.flatMap({ Bundle(url: $0)?.bundleIdentifier })
+			.flatMap({ id in Self.scriptableBrowsers.first(where: { $0.bundleID == id }) }) {
+			order.removeAll { $0.bundleID == defaultBrowser.bundleID }
+			order.insert(defaultBrowser, at: 0)
+		}
+		for browser in order where running.contains(browser.bundleID) {
+			if runFocusScript(browser) { return true }
+		}
+		return false
+	}
+
+	/**
+	 * AppleScript: activate the browser and focus the first tab whose URL
+	 * matches the GUI. Returns true on a hit; false on miss or error
+	 * (automation permission denied, browser busy) — the caller then falls
+	 * back to opening a fresh tab.
+	 */
+	private func runFocusScript(_ browser: (bundleID: String, appName: String, safari: Bool)) -> Bool {
+		let condition = guiURLPrefixes
+			.map { "URL of t starts with \"\($0)\"" }
+			.joined(separator: " or ")
+		let focusCommand = browser.safari
+			? "set current tab of w to t"
+			: "set active tab index of w to (index of t)"
+		let source = """
+			tell application "\(browser.appName)"
+				repeat with w in windows
+					repeat with t in (tabs of w)
+						if \(condition) then
+							\(focusCommand)
+							set index of w to 1
+							activate
+							return "true"
+						end if
+					end repeat
+				end repeat
+			end tell
+			return "false"
+			"""
+		var error: NSDictionary?
+		let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
+		return error == nil && result?.stringValue == "true"
 	}
 
 	@objc private func toggleLogin() {

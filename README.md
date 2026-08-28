@@ -12,7 +12,7 @@ A resident status-bar item — the DSH whale plus a status dot
 |---|---|
 | 启动 dsh (Start) | Launches `dsh web` detached (`nohup`, logs to `~/Library/Logs/dsh-web.log`) |
 | 终止 dsh (Stop) | SIGTERMs the process listening on the GUI port, escalating to SIGKILL after 5 s |
-| 打开 Web 界面 (Open UI) | Opens the GUI in your default browser |
+| 打开 Web 界面 (Open UI) | Focuses the already-open GUI tab if there is one, else opens it in your default browser |
 | 开机自启动 (Launch at login) | Registers/unregisters the login item (`SMAppService`) |
 | 退出控制器 (Quit) | Quits the controller itself (the dsh server keeps running) |
 
@@ -55,6 +55,10 @@ defaults write local.dsh.controller port 8080
   reference machine, while lsof always finds the actual listener.
 - **Start injects PATH**: GUI-launched processes have no shell environment,
   so the launcher's own bin dir (nvm's, next to `node`) is prepended.
+- **Open UI focuses an existing tab** (AppleScript; the default browser is
+  checked first, then other running scriptable browsers). The first use
+  asks for browser-automation permission once per browser; denying simply
+  falls back to opening a new tab.
 
 ## Credits
 
