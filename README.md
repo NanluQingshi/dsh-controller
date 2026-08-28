@@ -58,7 +58,10 @@ defaults write local.dsh.controller port 8080
 - **Open UI focuses an existing tab** (AppleScript; the default browser is
   checked first, then other running scriptable browsers). The first use
   asks for browser-automation permission once per browser; denying simply
-  falls back to opening a new tab.
+  falls back to opening a new tab. If no script finds the tab — e.g. a
+  second automation Chrome instance squats the Apple Events registration —
+  the controller activates whichever browser actually holds live GUI
+  connections (matched via the socket, immune to instance mixups).
 
 ## Credits
 

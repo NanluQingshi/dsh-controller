@@ -229,7 +229,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		for browser in order where running.contains(browser.bundleID) {
 			if runFocusScript(browser) { return true }
 		}
+		return activateGuiBrowserByConnection()
+	}
+
+	/**
+	 * Fallback when the AppleScript scan misses: a second automation Chrome
+	 * instance (e.g. one launched with --user-data-dir) can squat the Apple
+	 * Events registration and make the real browser invisible to scripts.
+	 * Locate the app that actually holds live GUI connections and activate
+	 * it by PID — works regardless of which browser it is.
+	 */
+	private func activateGuiBrowserByConnection() -> Bool {
+		guard let listenerPID = firstPID("lsof -tiTCP:\(dshPort) -sTCP:LISTEN") else { return false }
+		let selfPID = ProcessInfo.processInfo.processIdentifier
+		for pid in pids("lsof -tiTCP:\(dshPort) -sTCP:ESTABLISHED") where pid != selfPID && pid != listenerPID {
+			if let app = owningApplication(of: pid) {
+				app.activate()
+				return true
+			}
+		}
 		return false
+	}
+
+	private func pids(_ command: String) -> [pid_t] {
+		(runZshCapture(command) ?? "")
+			.split(whereSeparator: \.isWhitespace)
+			.compactMap { pid_t($0) }
+	}
+
+	private func runZshCapture(_ script: String) -> String? {
+		let process = Process()
+		process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+		process.arguments = ["-c", script]
+		let pipe = Pipe()
+		process.standardOutput = pipe
+		process.standardError = FileHandle.nullDevice
+		do { try process.run() } catch { return nil }
+		process.waitUntilExit()
+		guard process.terminationStatus == 0 else { return nil }
+		return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+	}
+
+	private func firstPID(_ command: String) -> pid_t? {
+		pids(command).first
+	}
+
+	/// Walk up the process tree from a helper PID (e.g. Chrome's network
+	/// service) to the registered regular .app that owns it.
+	private func owningApplication(of pid: pid_t) -> NSRunningApplication? {
+		var current = pid
+		for _ in 0..<12 {
+			if let app = NSRunningApplication(processIdentifier: current),
+				app.activationPolicy == .regular {
+				return app
+			}
+			guard let parent = pids("ps -o ppid= -p \(current)").first, parent > 1 else { return nil }
+			current = parent
+		}
+		return nil
 	}
 
 	/**
