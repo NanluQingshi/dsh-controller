@@ -192,13 +192,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 	}
 
 	@objc private func openUI() {
-		guard !focusExistingTab() else { return }
-		NSWorkspace.shared.open(dshURL)
+		// Async: the AppleScript scan can block on a TCC permission prompt —
+		// never let that freeze the menu bar. Connection-based activation
+		// runs first (fast, reliable); AppleScript then refines to the
+		// exact tab when the browser is scriptable-reachable.
+		DispatchQueue.global(qos: .userInitiated).async { [self] in
+			autoreleasepool {
+				let connected = activateGuiBrowserByConnection()
+				var asHit = false
+				for browser in orderedScriptableBrowsers() where !asHit {
+					asHit = runFocusScript(browser)
+				}
+				log("openUI: connectedActivation=\(connected) appleScriptTab=\(asHit)")
+				if !connected && !asHit {
+					DispatchQueue.main.async { NSWorkspace.shared.open(dshURL) }
+				}
+			}
+		}
 	}
 
 	// MARK: Existing-tab focus
 
-	/// Scriptable browsers we know how to focus a tab in.
+	/**
+	 * Scriptable browsers we know how to focus a tab in.
+	 */
 	private static let scriptableBrowsers: [(bundleID: String, appName: String, safari: Bool)] = [
 		("com.google.Chrome", "Google Chrome", false),
 		("com.microsoft.edgemac", "Microsoft Edge", false),
@@ -207,17 +224,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 		("com.apple.Safari", "Safari", true),
 	]
 
-	/// URL prefixes that count as "the GUI is already open in a tab".
-	private var guiURLPrefixes: [String] {
-		["http://127.0.0.1:\(dshPort)/", "http://localhost:\(dshPort)/"]
-	}
-
-	/**
-	 * Try to focus an already-open GUI tab instead of opening a new one:
-	 * the default browser first, then any other running scriptable browser.
-	 * Returns true when a tab was focused.
-	 */
-	private func focusExistingTab() -> Bool {
+	/// Running scriptable browsers, default browser first.
+	private func orderedScriptableBrowsers() -> [(bundleID: String, appName: String, safari: Bool)] {
 		let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
 		var order = Self.scriptableBrowsers.filter { running.contains($0.bundleID) }
 		if let defaultBrowser = NSWorkspace.shared.urlForApplication(toOpen: dshURL)
@@ -226,28 +234,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 			order.removeAll { $0.bundleID == defaultBrowser.bundleID }
 			order.insert(defaultBrowser, at: 0)
 		}
-		for browser in order where running.contains(browser.bundleID) {
-			if runFocusScript(browser) { return true }
+		return order
+	}
+
+	/// URL prefixes that count as "the GUI is already open in a tab".
+	private var guiURLPrefixes: [String] {
+		["http://127.0.0.1:\(dshPort)/", "http://localhost:\(dshPort)/"]
+	}
+
+	private func log(_ message: String) {
+		let line = "\(Date.now.formatted()) \(message)\n"
+		let path = NSHomeDirectory() + "/Library/Logs/dsh-controller.log"
+		if let handle = FileHandle(forWritingAtPath: path) {
+			defer { try? handle.close() }
+			handle.seekToEndOfFile()
+			handle.write(line.data(using: .utf8) ?? Data())
+		} else {
+			try? line.write(toFile: path, atomically: true, encoding: .utf8)
 		}
-		return activateGuiBrowserByConnection()
 	}
 
 	/**
-	 * Fallback when the AppleScript scan misses: a second automation Chrome
-	 * instance (e.g. one launched with --user-data-dir) can squat the Apple
-	 * Events registration and make the real browser invisible to scripts.
-	 * Locate the app that actually holds live GUI connections and activate
-	 * it by PID — works regardless of which browser it is.
+	 * Activate the browser that actually holds live GUI connections — found
+	 * via the socket, immune to automation-Chrome instance mixups that make
+	 * the real browser invisible to AppleScript. Returns true when a browser
+	 * was activated.
 	 */
 	private func activateGuiBrowserByConnection() -> Bool {
-		guard let listenerPID = firstPID("lsof -tiTCP:\(dshPort) -sTCP:LISTEN") else { return false }
+		guard let listenerPID = firstPID("lsof -tiTCP:\(dshPort) -sTCP:LISTEN") else {
+			log("connectionActivation: no listener on port \(dshPort)")
+			return false
+		}
 		let selfPID = ProcessInfo.processInfo.processIdentifier
 		for pid in pids("lsof -tiTCP:\(dshPort) -sTCP:ESTABLISHED") where pid != selfPID && pid != listenerPID {
 			if let app = owningApplication(of: pid) {
-				app.activate()
-				return true
+				let ok = app.activate()
+				log("connectionActivation: pid \(pid) -> \(app.localizedName ?? app.bundleIdentifier ?? "?") activate=\(ok)")
+				return ok
 			}
 		}
+		log("connectionActivation: no non-self GUI client found")
 		return false
 	}
 

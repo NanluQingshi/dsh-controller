@@ -71,4 +71,4 @@ defaults write local.dsh.controller port 8080
 
 ## License
 
-[MIT](LICENSE) © nlqs
+[MIT](LICENSE) © NanluQingshi
